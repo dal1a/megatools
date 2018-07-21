@@ -27,11 +27,13 @@ static gchar *opt_path = ".";
 static gboolean opt_stream = FALSE;
 static gboolean opt_noprogress = FALSE;
 static gboolean opt_print_names = FALSE;
+static gboolean opt_not_all = FALSE;
 
 static GOptionEntry entries[] = {
 	{ "path", '\0', 0, G_OPTION_ARG_FILENAME, &opt_path, "Local directory or file name, to save data to", "PATH" },
 	{ "no-progress", '\0', 0, G_OPTION_ARG_NONE, &opt_noprogress, "Disable progress bar", NULL },
 	{ "print-names", '\0', 0, G_OPTION_ARG_NONE, &opt_print_names, "Print names of downloaded files", NULL },
+	{ "not-all", '\0', 0, G_OPTION_ARG_NONE, &opt_not_all, "Choose which files to download", NULL },
 	{ NULL }
 };
 
@@ -107,7 +109,47 @@ static gboolean dl_sync_dir(struct mega_node *node, GFile *file, const gchar *re
 
 	// sync children
 	GSList *children = mega_session_get_node_chilren(s, node), *i;
+	GSList *place_holder = children;
 	gboolean status = TRUE;
+	if (opt_not_all) {
+		int position = 1;
+		for (i = children; i; i = i->next) {
+			g_print("%d. %s\n", position, ((struct mega_node*)i->data)->name);
+			position++;
+		}
+		g_print("Which files to download? (numbers separated by space or 'all' for all)\n");
+		char buff[1024];
+		position = 0;
+		GSList *wanted_children = 0;
+		gboolean end_of_line = FALSE;
+		while(!end_of_line && fgets(buff, sizeof(buff), stdin)) {
+			//doesn't work for lines longer than 1024 chars, could split a number in half
+			//but I don't think anyone would need more than 1000 chars to specify what they wish to download
+			if(!strcmp(buff, "all\n") || !strcmp(buff, "ALL\n") || !strcmp(buff, "All\n")) {
+				wanted_children = children;
+				break;
+			}
+			while(position < 1024) {
+				int pos = atoi(buff+position) - 1;
+				if(pos < g_slist_length(children))
+					wanted_children = g_slist_append(wanted_children, g_slist_nth_data(children, pos));
+				while(buff[position] != ' ') {
+					position++;
+					if(buff[position] == '\n' || buff[position] == '\0') {
+						if(buff[position] == '\n')
+							end_of_line = TRUE;
+						position = 1024;
+						break;
+					}
+				}
+				position++;
+			}
+			position = 0;
+		}
+		if (wanted_children != children) {
+			children = wanted_children;
+		}
+	}
 	for (i = children; i; i = i->next) {
 		struct mega_node *child = i->data;
 		gc_free gchar *child_remote_path = g_strconcat(remote_path, "/", child->name, NULL);
@@ -122,6 +164,7 @@ static gboolean dl_sync_dir(struct mega_node *node, GFile *file, const gchar *re
 		}
 	}
 
+	g_slist_free(place_holder);
 	g_slist_free(children);
 	return status;
 }
