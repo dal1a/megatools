@@ -55,7 +55,7 @@ static gchar *opt_proxy;
 static gchar *proxy;
 static gint upload_speed_limit;
 static gint download_seed_limit;
-static gint transfer_worker_count = 3;
+static gint transfer_worker_count = 5;
 static gint cache_timout = 10 * 60;
 static gboolean opt_enable_previews = BOOLEAN_UNSET_BUT_TRUE;
 static gboolean opt_disable_resume;
@@ -309,14 +309,14 @@ void tool_show_progress(const gchar *file, const struct mega_status_data *data)
 		return;
 
 	// start of the new transfer, initialize progress reporting
-	if (data->progress.done < 0) {
+	if (data->progress.done == -1) {
 		transfer_start = last_update = timenow;
 		last_bytes = 0;
-	} else if (transfer_start < 0) {
+	} else if (transfer_start < 0)
 		return;
-	} else if (data->progress.done == data->progress.total) {
-		now_done = data->progress.done;
-	} else if (last_update && last_update + PROGRESS_FREQUENCY > timenow)
+	else if (data->progress.done == -2)
+		now_done = data->progress.total;
+	else if (last_update && last_update + PROGRESS_FREQUENCY > timenow)
 		return;
 	else
 		now_done = data->progress.done;
@@ -325,7 +325,7 @@ void tool_show_progress(const gchar *file, const struct mega_status_data *data)
 	gint64 size_diff = now_done - last_bytes;
 	gdouble rate, percentage;
 
-	if (now_done == data->progress.total) {
+	if (data->progress.done == -2) {
 		// final summary
 		rate = (gdouble)data->progress.total * 1e6 / (timenow - transfer_start);
 		percentage = 100;
@@ -381,6 +381,31 @@ void tool_show_progress(const gchar *file, const struct mega_status_data *data)
 
 	last_update = timenow;
 	last_bytes = now_done;
+}
+
+gchar* tool_prompt_input(void)
+{
+	gc_string_free GString* str = g_string_sized_new(1024);
+	gchar* ret = NULL;
+
+	while (TRUE) {
+		char buf[256];
+
+		if (fgets(buf, sizeof buf, stdin) == NULL)
+			return NULL;
+
+		int len = strlen(buf);
+		gboolean has_eol = buf[len - 1] == '\n';
+		if (len > 0)
+			g_string_append_len(str, buf, has_eol ? len - 1 : len);
+
+		if (has_eol || feof(stdin))
+			break;
+	}
+
+	ret = g_string_free(str, FALSE);
+	str = NULL;
+	return ret;
 }
 
 static gchar *input_password(void)
@@ -586,8 +611,8 @@ void tool_init(gint *ac, gchar ***av, const gchar *tool_name, GOptionEntry *tool
 					g_clear_error(&local_err);
 				}
 
-				if (transfer_worker_count < 1 || transfer_worker_count > 5) {
-					transfer_worker_count = CLAMP(transfer_worker_count, 1, 5);
+				if (transfer_worker_count < 1 || transfer_worker_count > 16) {
+					transfer_worker_count = CLAMP(transfer_worker_count, 1, 16);
 					g_printerr(
 						"WARNING: Invalid number of parallel transfers set in the config file, limited to %d\n",
 						transfer_worker_count);

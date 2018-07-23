@@ -73,6 +73,8 @@ DownloadSpeedLimit::
 UploadSpeedLimit::
 	Set maximum allowed upload speed in KiB/s.
 	0 means no limit. Overrides SpeedLimit setting.
+	When using ParallelTransfers > 1, upload speed limit is applied
+	to each transfer individually.
 
 SpeedLimit::
 	Set maximum allowed upload and download speed in KiB/s.
@@ -81,7 +83,8 @@ SpeedLimit::
 ParallelTransfers::
 	Set maximum allowed number of parallel connections when upload or downloading a file.
 	The file is split into chunks of a size between 128 kiB and 1 MiB, and these chunks
-	are then uploaded in parallel. The number must be between 1 and 5. Default is 3.
+	are uploaded in parallel.
+	The number must be between 1 and 16. Default is 5.
 
 Proxy::
 	Use proxy server to connect to mega.nz.

@@ -28,8 +28,8 @@
 #define MEGA_ERROR mega_error_quark()
 
 enum {
-	MEGA_ERROR_RATELIMIT,
-	MEGA_ERROR_OVERQUOTA,
+	MEGA_ERROR_AGAIN,
+	MEGA_ERROR_NO_HANDLE,
 	MEGA_ERROR_OTHER
 };
 
@@ -181,6 +181,7 @@ void mega_download_data_free(struct mega_download_data_params *params);
 gboolean mega_node_is_writable(struct mega_session *s, struct mega_node *n);
 
 gboolean mega_node_is_container(struct mega_node *n);
+gboolean mega_node_has_ancestor(struct mega_node *n, struct mega_node *ancestor);
 gchar *mega_node_get_link(struct mega_node *n, gboolean include_key);
 gchar *mega_node_get_key(struct mega_node *n);
 gboolean mega_node_get_path(struct mega_node *n, gchar *buf, gsize len);

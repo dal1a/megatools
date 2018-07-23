@@ -51,15 +51,6 @@ static void http_unlock_cb(CURL *handle, curl_lock_data data, void *userptr)
 }
 
 G_LOCK_DEFINE_STATIC(http_init);
-#endif
-
-struct http {
-	CURL *curl;
-	GHashTable *headers;
-
-	http_progress_fn progress_cb;
-	gpointer progress_data;
-};
 
 void http_init(void)
 {
@@ -97,6 +88,19 @@ void http_cleanup(void)
 
 	G_UNLOCK(http_init);
 }
+#else
+void http_init(void) {}
+void http_cleanup(void) {}
+#endif
+
+struct http {
+	CURL *curl;
+	GHashTable *headers;
+
+	http_progress_fn progress_cb;
+	gpointer progress_data;
+};
+
 
 struct http *http_new(void)
 {
@@ -109,8 +113,8 @@ struct http *http_new(void)
 	}
 
 #if CURL_AT_LEAST_VERSION(7, 57, 0) && defined ENABLE_CONN_SHARING
-	http_init();
-	curl_easy_setopt(h->curl, CURLOPT_SHARE, http_share);
+	//http_init();
+	//curl_easy_setopt(h->curl, CURLOPT_SHARE, http_share);
 #endif
 
 #if CURL_AT_LEAST_VERSION(7, 21, 6)
@@ -124,17 +128,23 @@ struct http *http_new(void)
 		curl_easy_setopt(h->curl, CURLOPT_VERBOSE, 1L);
 
 	curl_easy_setopt(h->curl, CURLOPT_FOLLOWLOCATION, 1L);
-
-	curl_easy_setopt(h->curl, CURLOPT_TCP_KEEPALIVE, 1L);
-	curl_easy_setopt(h->curl, CURLOPT_TCP_KEEPIDLE, 120L);
-	curl_easy_setopt(h->curl, CURLOPT_TCP_KEEPINTVL, 60L);
+	curl_easy_setopt(h->curl, CURLOPT_NOSIGNAL, 1L);
+	curl_easy_setopt(h->curl, CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
 
 	h->headers = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
 
 	// set default headers
-	http_set_header(h, "Referer", "https://mega.nz/");
 	//http_set_header(h, "User-Agent", "Megatools (" VERSION ")");
+	
+	// we are Firefox!
 	http_set_header(h, "User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:61.0) Gecko/20100101 Firefox/61.0");
+	http_set_header(h, "Referer", "https://mega.nz/");
+	http_set_header(h, "Origin", "https://mega.nz");
+	http_set_header(h, "Accept", "*/*");
+	http_set_header(h, "Accept-Language", "en-US;q=0.8,en;q=0.3");
+	http_set_header(h, "Cache-Control", "no-cache");
+	http_set_header(h, "Pragma", "no-cache");
+	http_set_header(h, "DNT", "1");
 
 	// Disable 100-continue (because it causes needless roundtrips)
 	http_set_header(h, "Expect", "");
@@ -142,15 +152,21 @@ struct http *http_new(void)
 	return h;
 }
 
+void http_set_max_connects(struct http *h, long max)
+{
+	g_return_if_fail(h != NULL);
+
+	curl_easy_setopt(h->curl, CURLOPT_MAXCONNECTS, max);
+}
+
 void http_expect_short_running(struct http *h)
 {
 	g_return_if_fail(h != NULL);
 
 	// don't use alarm signal to time out dns queries
-	curl_easy_setopt(h->curl, CURLOPT_NOSIGNAL, 1L);
-	curl_easy_setopt(h->curl, CURLOPT_TIMEOUT, 180L); // 180s max per connection
-	curl_easy_setopt(h->curl, CURLOPT_LOW_SPEED_TIME, 30L); // 30s max of very low speed
-	curl_easy_setopt(h->curl, CURLOPT_LOW_SPEED_LIMIT, 60L);
+	curl_easy_setopt(h->curl, CURLOPT_TIMEOUT, 10*60L); // 10 minutes max per connection
+	curl_easy_setopt(h->curl, CURLOPT_LOW_SPEED_TIME, 60L); // 60s max of very low speed
+	curl_easy_setopt(h->curl, CURLOPT_LOW_SPEED_LIMIT, 10L);
 }
 
 void http_set_header(struct http *h, const gchar *name, const gchar *value)
@@ -174,7 +190,7 @@ void http_set_content_length(struct http *h, goffset len)
 	g_free(tmp);
 }
 
-static int curl_progress(struct http *h, double dltotal, double dlnow, double ultotal, double ulnow)
+static int curl_progress(struct http *h, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow)
 {
 	if (h->progress_cb) {
 		if (!h->progress_cb(dltotal, dlnow, ultotal, ulnow, h->progress_data))
@@ -204,8 +220,8 @@ void http_set_progress_callback(struct http *h, http_progress_fn cb, gpointer da
 		h->progress_data = data;
 
 		curl_easy_setopt(h->curl, CURLOPT_NOPROGRESS, 0L);
-		curl_easy_setopt(h->curl, CURLOPT_PROGRESSFUNCTION, (curl_progress_callback)curl_progress);
-		curl_easy_setopt(h->curl, CURLOPT_PROGRESSDATA, h);
+		curl_easy_setopt(h->curl, CURLOPT_XFERINFOFUNCTION, curl_progress);
+		curl_easy_setopt(h->curl, CURLOPT_XFERINFODATA, h);
 	} else {
 		curl_easy_setopt(h->curl, CURLOPT_NOPROGRESS, 1L);
 	}
@@ -226,10 +242,37 @@ static size_t append_gstring(void *buffer, size_t size, size_t nmemb, GString *s
 	return nmemb;
 }
 
+static gboolean to_error(struct http* h, CURLcode res, GError** err)
+{
+	glong http_status = 0;
+
+	if (res == CURLE_OK) {
+		if (curl_easy_getinfo(h->curl, CURLINFO_RESPONSE_CODE, &http_status) == CURLE_OK) {
+			if (http_status == 200 || http_status == 201)
+				return FALSE;
+			else if (http_status == 500)
+				g_set_error(err, HTTP_ERROR, HTTP_ERROR_SERVER_BUSY,
+					    "Server returned %ld (probably busy)", http_status);
+			else if (http_status == 509)
+				g_set_error(err, HTTP_ERROR, HTTP_ERROR_BANDWIDTH_LIMIT,
+					    "Server returned %ld (over quota)", http_status);
+			else
+				g_set_error(err, HTTP_ERROR, HTTP_ERROR_OTHER, "Server returned %ld", http_status);
+		} else
+			g_set_error(err, HTTP_ERROR, HTTP_ERROR_OTHER, "Can't get http status code");
+	} else if (res == CURLE_OPERATION_TIMEDOUT)
+		g_set_error(err, HTTP_ERROR, HTTP_ERROR_TIMEOUT, "CURL timeout: %s", curl_easy_strerror(res));
+	else if (res == CURLE_GOT_NOTHING)
+		g_set_error(err, HTTP_ERROR, HTTP_ERROR_NO_RESPONSE, "CURL error: %s", curl_easy_strerror(res));
+	else
+		g_set_error(err, HTTP_ERROR, HTTP_ERROR_OTHER, "CURL error: %s", curl_easy_strerror(res));
+
+	return TRUE;
+}
+
 GString *http_post(struct http *h, const gchar *url, const gchar *body, gssize body_len, GError **err)
 {
 	struct curl_slist *headers = NULL;
-	glong http_status = 0;
 	GString *response;
 	CURLcode res;
 
@@ -261,36 +304,15 @@ GString *http_post(struct http *h, const gchar *url, const gchar *body, gssize b
 
 	// perform HTTP request
 	res = curl_easy_perform(h->curl);
+	if (to_error(h, res, err)) {
+		g_string_free(response, TRUE);
+		response = NULL;
+	}
 
-	// check the result
-	if (res == CURLE_OK) {
-		if (curl_easy_getinfo(h->curl, CURLINFO_RESPONSE_CODE, &http_status) == CURLE_OK) {
-			if (http_status == 200 || http_status == 201)
-				goto out;
-			else if (http_status == 500)
-				g_set_error(err, HTTP_ERROR, HTTP_ERROR_SERVER_BUSY,
-					    "Server returned %ld (probably busy)", http_status);
-			else
-				g_set_error(err, HTTP_ERROR, HTTP_ERROR_OTHER, "Server returned %ld", http_status);
-		} else
-			g_set_error(err, HTTP_ERROR, HTTP_ERROR_OTHER, "Can't get http status code");
-	} else if (res == CURLE_OPERATION_TIMEDOUT)
-		g_set_error(err, HTTP_ERROR, HTTP_ERROR_TIMEOUT, "CURL timeout: %s", curl_easy_strerror(res));
-	else if (res == CURLE_GOT_NOTHING)
-		g_set_error(err, HTTP_ERROR, HTTP_ERROR_NO_RESPONSE, "CURL error: %s", curl_easy_strerror(res));
-	else
-		g_set_error(err, HTTP_ERROR, HTTP_ERROR_OTHER, "CURL error: %s", curl_easy_strerror(res));
-
-	g_string_free(response, TRUE);
-	response = NULL;
-
-out:
 	curl_easy_setopt(h->curl, CURLOPT_HTTPHEADER, NULL);
 	curl_slist_free_all(headers);
-	if (response)
-		return response;
 
-	return NULL;
+	return response;
 }
 
 struct stream_data {
@@ -307,7 +329,6 @@ GString *http_post_stream_upload(struct http *h, const gchar *url, goffset len, 
 				 gpointer user_data, GError **err)
 {
 	struct curl_slist *headers = NULL;
-	glong http_status = 0;
 	GString *response;
 	CURLcode res;
 	struct stream_data data;
@@ -339,33 +360,15 @@ GString *http_post_stream_upload(struct http *h, const gchar *url, goffset len, 
 
 	// perform HTTP request
 	res = curl_easy_perform(h->curl);
+	if (to_error(h, res, err)) {
+		g_string_free(response, TRUE);
+		response = NULL;
+	}
 
-	// check the result
-	if (res == CURLE_OK) {
-		if (curl_easy_getinfo(h->curl, CURLINFO_RESPONSE_CODE, &http_status) == CURLE_OK) {
-			if (http_status == 200) {
-				goto out;
-			} else
-				g_set_error(err, HTTP_ERROR, HTTP_ERROR_OTHER, "Server returned %ld", http_status);
-		} else
-			g_set_error(err, HTTP_ERROR, HTTP_ERROR_OTHER, "Can't get http status code");
-	} else if (res == CURLE_OPERATION_TIMEDOUT)
-		g_set_error(err, HTTP_ERROR, HTTP_ERROR_TIMEOUT, "CURL timeout: %s", curl_easy_strerror(res));
-	else if (res == CURLE_GOT_NOTHING)
-		g_set_error(err, HTTP_ERROR, HTTP_ERROR_NO_RESPONSE, "CURL error: %s", curl_easy_strerror(res));
-	else
-		g_set_error(err, HTTP_ERROR, HTTP_ERROR_OTHER, "CURL error: %s", curl_easy_strerror(res));
-
-	g_string_free(response, TRUE);
-	response = NULL;
-
-out:
 	curl_easy_setopt(h->curl, CURLOPT_HTTPHEADER, NULL);
 	curl_slist_free_all(headers);
-	if (response)
-		return response;
 
-	return NULL;
+	return response;
 }
 
 static size_t curl_write(void *buffer, size_t size, size_t nmemb, struct stream_data *data)
@@ -397,10 +400,9 @@ gboolean http_post_stream_download(struct http *h, const gchar *url, http_data_f
 				   GError **err)
 {
 	struct curl_slist *headers = NULL;
-	glong http_status = 0;
 	CURLcode res;
 	struct stream_data data;
-	gboolean status = FALSE;
+	gboolean status = TRUE;
 
 	g_return_val_if_fail(h != NULL, FALSE);
 	g_return_val_if_fail(url != NULL, FALSE);
@@ -424,22 +426,9 @@ gboolean http_post_stream_download(struct http *h, const gchar *url, http_data_f
 
 	// perform HTTP request
 	res = curl_easy_perform_retry_empty(h->curl);
-	// check the result
-	if (res == CURLE_OK) {
-		if (curl_easy_getinfo(h->curl, CURLINFO_RESPONSE_CODE, &http_status) == CURLE_OK) {
-			if (http_status == 200) {
-				status = TRUE;
-				goto out;
-			} else
-				g_set_error(err, HTTP_ERROR, HTTP_ERROR_OTHER, "Server returned %ld", http_status);
-		} else
-			g_set_error(err, HTTP_ERROR, HTTP_ERROR_OTHER, "Can't get http status code");
-	} else if (res == CURLE_OPERATION_TIMEDOUT)
-		g_set_error(err, HTTP_ERROR, HTTP_ERROR_TIMEOUT, "CURL timeout: %s", curl_easy_strerror(res));
-	else
-		g_set_error(err, HTTP_ERROR, HTTP_ERROR_OTHER, "CURL error: %s", curl_easy_strerror(res));
+	if (to_error(h, res, err))
+		status = FALSE;
 
-out:
 	curl_easy_setopt(h->curl, CURLOPT_HTTPHEADER, NULL);
 	curl_slist_free_all(headers);
 	return status;

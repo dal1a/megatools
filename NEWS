@@ -1,10 +1,11 @@
-megatools 1.10.0-rc2 - 2018-07-19
-=================================
+megatools 1.10.0 - 2018-07-22
+=============================
 
 This release contains new features and optimizaions.
 
 New features/optimizations:
-- Chunked upload using up to 16 concurrent connections.
+- Chunked upload using up to 16 concurrent connections. Remember, more is not
+  always better.
 - Improved upload stability. When mega drops or hangs the data connection,
   megatools will simply restart the upload of the chunk of data that got lost.
 - 5x AES enryption/decryption speed increase for uploads and downloads. Now
@@ -17,13 +18,15 @@ New features/optimizations:
   writes data to a temporary file and renames it to the target name, when the
   download is fully completed. This way you'll notice that download was
   interrupted by CTRL+C and megatools will not leave half finished work behind.
-- Add contributed bash auto-completion file by albaldi #250
+- Add contributed bash auto-completion file by albaldi #368
 - Add support for authenticated downloads of exported files using megadl #298
   (So that your account download quota is used instead of public quota.)
 - Add Upload section and CreatePreviews setting into rc file. Add --enable-previews
   option.
+- Add support for megals --print0|-0
 
 Fixes:
+- Upload hangs at 100% #366 #360 #365
 - Don't send tetrminal escape sequences, when redirecting stdout.
 - Fix comments syntax in megarc man page #359
 - Use glib's variants of PRIu64, fixes #328

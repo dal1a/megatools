@@ -28,6 +28,7 @@ enum {
 	HTTP_ERROR_NO_RESPONSE,
 	HTTP_ERROR_TIMEOUT,
 	HTTP_ERROR_SERVER_BUSY,
+	HTTP_ERROR_BANDWIDTH_LIMIT,
 	HTTP_ERROR_OTHER
 };
 
@@ -39,6 +40,7 @@ typedef gboolean (*http_progress_fn)(goffset dltotal, goffset dlnow, goffset ult
 
 struct http *http_new(void);
 
+void http_set_max_connects(struct http *h, long max);
 void http_expect_short_running(struct http *h);
 void http_set_content_type(struct http *h, const gchar *type);
 void http_set_content_length(struct http *h, goffset len);
