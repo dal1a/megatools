@@ -119,7 +119,7 @@ static GSList *choose_dir_files(GSList *input, GSList *source) {
 			g_print("\n");
 		}
 	}
-	g_print("Which files to download? (numbers separated by space or 'all' for all)\n");
+	g_print("Which files to download? (numbers separated by space or 'all' for all, choosing a folder will download everything within that folder)\n");
 	char buff[1024];
 	position = 0;
 	gboolean end_of_line = FALSE;
