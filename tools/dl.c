@@ -248,12 +248,11 @@ GSList* pick_nodes(void)
 
 		g_print("%*s\033[0;90m|--\033[0m%d. %s", indent*3, "", position, node->name);
 		if (mega_node_is_container(node)) {
-			g_print("/\n");
+			g_print("/");
 			indent++;
 			parent = node;
-		} else {
-			g_print("\n");
 		}
+		g_print("\n");
 
 		position++;
 	}
