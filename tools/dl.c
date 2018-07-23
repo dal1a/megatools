@@ -191,8 +191,23 @@ static gint compare_node(struct mega_node *a, struct mega_node *b)
 	gchar path1[4096];
 	gchar path2[4096];
 
-	if (mega_node_get_path(a, path1, 4096) && mega_node_get_path(b, path2, 4096))
+	if (mega_node_get_path(a, path1, 4096) && mega_node_get_path(b, path2, 4096)) {
+		if (mega_node_is_container(a)) {
+			int pos = strlen(path1);
+			if(pos < 4095) {
+				path1[pos] = '/';
+				path1[pos+1] = '\0';
+			}
+		}
+		if (mega_node_is_container(b)) {
+			int pos = strlen(path2);
+			if(pos < 4095) {
+				path2[pos] = '/';
+				path2[pos+1] = '\0';
+			}
+		}
 		return strcmp(path1, path2);
+	}
 	return 0;
 }
 
