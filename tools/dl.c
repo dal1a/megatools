@@ -230,16 +230,30 @@ prune_node:;
 GSList* pick_nodes(void)
 {
 	GSList *nodes = mega_session_ls(s, "/", TRUE), *it, *chosen_nodes;
-	int position = 1;
+	int position = 2;
 
 	nodes = g_slist_sort(nodes, (GCompareFunc)compare_node);
 
-	for (it = nodes; it; it = it->next) {
-		struct mega_node *node = it->data;
-		gchar path[4096];
+	struct mega_node *parent = nodes->data;
+	int indent = 0;
 
-		if (mega_node_get_path(node, path, sizeof path))
-			g_print("%d. %s%s\n", position, path, mega_node_is_container(node) ? "/" : "");
+	g_print("1. %s/\n", ((struct mega_node*)nodes->data)->name);
+
+	for (it = nodes->next; it; it = it->next) {
+		struct mega_node *node = it->data;
+		while(parent != node->parent && indent != 0) {
+			indent--;
+			parent = parent->parent;
+		}
+
+		g_print("%*s\033[0;90m|--\033[0m%d. %s", indent*3, "", position, node->name);
+		if (mega_node_is_container(node)) {
+			g_print("/\n");
+			indent++;
+			parent = node;
+		} else {
+			g_print("\n");
+		}
 
 		position++;
 	}
