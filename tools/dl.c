@@ -18,6 +18,7 @@
  */
 
 #include "tools.h"
+#include "shell.h"
 #ifdef G_OS_WIN32
 #include <io.h>
 #include <fcntl.h>
@@ -252,7 +253,7 @@ GSList* pick_nodes(void)
 	struct mega_node *parent = nodes->data;
 	int indent = 0;
 
-	g_print("1. %s/\n", ((struct mega_node*)nodes->data)->name);
+	g_print("1. %s%s\n", parent->name, mega_node_is_container(parent) ? "/" : "");
 
 	for (it = nodes->next; it; it = it->next) {
 		struct mega_node *node = it->data;
@@ -261,11 +262,14 @@ GSList* pick_nodes(void)
 			parent = parent->parent;
 		}
 
-		g_print("%*s" ESC_GRAY "|--" ESC_NORMAL "%d. %s", indent*3, "", position, node->name);
+		g_print("%*s|--" ESC_NORMAL "%d. %s", indent*3, "", position, node->name);
 		if (mega_node_is_container(node)) {
 			g_print("/");
 			indent++;
 			parent = node;
+		} else {
+			gc_free gchar *size_str = g_format_size_full(node->size, G_FORMAT_SIZE_IEC_UNITS);
+			g_print(" (%s)", size_str);
 		}
 		g_print("\n");
 
@@ -316,7 +320,7 @@ static gboolean dl_sync_dir_choose(GFile *local_dir)
 	return status;
 }
 
-int main(int ac, char *av[])
+static int dl_main(int ac, char *av[])
 {
 	gc_error_free GError *local_err = NULL;
 	gc_regex_unref GRegex *file_regex = NULL, *folder_regex = NULL;
@@ -354,7 +358,7 @@ int main(int ac, char *av[])
 	g_assert(file_regex != NULL);
 
 	folder_regex =
-		g_regex_new("^https?://mega(?:\\.co)?\\.nz/#F!([a-z0-9_-]{8})!([a-z0-9_-]{22})(![a-z0-9_-]{8})?$",
+		g_regex_new("^https?://mega(?:\\.co)?\\.nz/#F!([a-z0-9_-]{8})!([a-z0-9_-]{22})(?:[!?]([a-z0-9_-]{8}))?$",
 			    G_REGEX_CASELESS, 0, NULL);
 	g_assert(folder_regex != NULL);
 
@@ -409,10 +413,6 @@ int main(int ac, char *av[])
 			key = g_match_info_fetch(m2, 2);
 			specific = g_match_info_fetch(m2, 3);
 
-			// remove first char of |specific| since it's an '!'
-			if (specific)
-				memmove(&specific[0], &specific[1], strlen(specific));
-
 			// perform download
 			if (!mega_session_open_exp_folder(s, handle, key, specific, &local_err)) {
 				g_printerr("ERROR: Can't open folder '%s': %s\n", link, local_err->message);
@@ -432,8 +432,14 @@ int main(int ac, char *av[])
 							if (!dl_sync_dir_choose(local_dir))
 								status = 1;
 						} else {
-							if (!dl_sync_dir(root_node, local_dir))
-								status = 1;
+							if (root_node->type == MEGA_NODE_FILE) {
+								gc_object_unref GFile *local_path = g_file_get_child(local_dir, root_node->name);
+								if (!dl_sync_file(root_node, local_path))
+									status = 1;
+							} else {
+								if (!dl_sync_dir(root_node, local_dir))
+									status = 1;
+							}
 						}
 					} else {
 						g_printerr("ERROR: %s must be a directory\n", opt_path);
@@ -454,3 +460,13 @@ int main(int ac, char *av[])
 	tool_fini(s);
 	return status;
 }
+
+const struct shell_tool shell_tool_dl = {
+	.name = "dl",
+	.main = dl_main,
+	.usages = (char*[]){
+		"[--no-progress] [--path <path>] <links>...",
+		"--path - <filelink>",
+		NULL
+	},
+};

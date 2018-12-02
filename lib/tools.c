@@ -60,6 +60,8 @@ static gint cache_timout = 10 * 60;
 static gboolean opt_enable_previews = BOOLEAN_UNSET_BUT_TRUE;
 static gboolean opt_disable_resume;
 
+static gboolean tool_use_colors = FALSE;
+
 static gboolean opt_debug_callback(const gchar *option_name, const gchar *value, gpointer data, GError **error)
 {
 	if (value) {
@@ -223,29 +225,6 @@ static void init_openssl_locking()
 #endif
 #endif
 
-#ifdef G_OS_WIN32
-static gchar *get_tools_dir(void)
-{
-	gchar *path = NULL;
-	wchar_t *wpath;
-	DWORD len = PATH_MAX;
-
-	HMODULE handle = GetModuleHandleW(NULL);
-
-	wpath = g_new0(wchar_t, len);
-	if (GetModuleFileNameW(handle, wpath, len) < len)
-		path = g_utf16_to_utf8(wpath, -1, NULL, NULL, NULL);
-	g_free(wpath);
-
-	if (path == NULL)
-		path = g_strdup("");
-
-	gchar *dir = g_path_get_dirname(path);
-	g_free(path);
-	return dir;
-}
-#endif
-
 static void init(void)
 {
 #if !GLIB_CHECK_VERSION(2, 32, 0)
@@ -266,20 +245,6 @@ static void init(void)
 #endif
 
 	init_openssl_locking();
-
-#ifdef G_OS_WIN32
-	gchar *tools_dir = get_tools_dir();
-
-	gchar *tmp = g_build_filename(tools_dir, "gio", NULL);
-	g_setenv("GIO_EXTRA_MODULES", tmp, TRUE);
-	g_free(tmp);
-
-	gchar *certs = g_build_filename(tools_dir, "ca-certificates.crt", NULL);
-	g_setenv("CA_CERT_PATH", certs, TRUE);
-	g_free(certs);
-
-	g_free(tools_dir);
-#endif
 }
 
 gboolean tool_is_stdout_tty(void)
@@ -334,11 +299,11 @@ void tool_show_progress(const gchar *file, const struct mega_status_data *data)
 		total_str = g_format_size_full(data->progress.total, G_FORMAT_SIZE_IEC_UNITS);
 		rate_str = g_format_size_full(rate, G_FORMAT_SIZE_IEC_UNITS);
 
-		if (tool_is_stdout_tty()) {
+		if (tool_use_colors) {
 			g_print(ESC_WHITE "%s" ESC_NORMAL ": "
 				ESC_YELLOW "%.2f%%" ESC_NORMAL " - "
 				"done " ESC_GREEN "%s" ESC_NORMAL
-				" (avg. %s/s)" ESC_CLREOL "\r",
+				" (avg. %s/s)\n",
 				file, percentage, total_str, rate_str);
 		} else {
 			g_print("%s: %.2f%% - done %s (avg. %s/s)\n", file, percentage, total_str, rate_str);
@@ -350,15 +315,16 @@ void tool_show_progress(const gchar *file, const struct mega_status_data *data)
 		done_str = g_format_size_full(now_done, G_FORMAT_SIZE_IEC_UNITS | G_FORMAT_SIZE_LONG_FORMAT);
 		total_str = g_format_size_full(data->progress.total, G_FORMAT_SIZE_IEC_UNITS);
 
-		if (tool_is_stdout_tty()) {
+		if (tool_use_colors) {
 			g_print(ESC_WHITE "%s" ESC_NORMAL ": "
 				ESC_YELLOW "%.2f%%" ESC_NORMAL " - "
-				ESC_GREEN "%s" ESC_BLUE " of %s" ESC_NORMAL
-				ESC_CLREOL "\r",
+				ESC_GREEN "%s" ESC_BLUE " of %s" ESC_NORMAL,
 				file, percentage, done_str, total_str);
 		} else {
-			g_print("%s: %.2f%% - %s of %s\n", file, percentage, done_str, total_str);
+			g_print("%s: %.2f%% - %s of %s", file, percentage, done_str, total_str);
 		}
+
+		g_print("%s", tool_is_stdout_tty() ? ESC_CLREOL "\r" : "\n");
 	} else {
 		// regular update
 		rate = (gdouble)size_diff * 1e6 / time_span;
@@ -368,15 +334,17 @@ void tool_show_progress(const gchar *file, const struct mega_status_data *data)
 		total_str = g_format_size_full(data->progress.total, G_FORMAT_SIZE_IEC_UNITS);
 		rate_str = g_format_size_full(rate, G_FORMAT_SIZE_IEC_UNITS);
 
-		if (tool_is_stdout_tty()) {
+		if (tool_use_colors) {
 			g_print(ESC_WHITE "%s" ESC_NORMAL ": "
 				ESC_YELLOW "%.2f%%" ESC_NORMAL " - "
 				ESC_GREEN "%s" ESC_BLUE " of %s" ESC_NORMAL
-				" (%s/s)" ESC_CLREOL "\r",
+				" (%s/s)",
 				file, percentage, done_str, total_str, rate_str);
 		} else {
-			g_print("%s: %.2f%% - %s of %s (%s/s)\n", file, percentage, done_str, total_str, rate_str);
+			g_print("%s: %.2f%% - %s of %s (%s/s)", file, percentage, done_str, total_str, rate_str);
 		}
+
+		g_print("%s", tool_is_stdout_tty() ? ESC_CLREOL "\r" : "\n");
 	}
 
 	last_update = timenow;
@@ -461,7 +429,7 @@ static void print_version(void)
 {
 	if (opt_version) {
 		g_print("megatools " VERSION " - command line tools for Mega.nz\n\n");
-		g_print("Written by Ondřej Jirman <megous@megous.com>, 2013\n");
+		g_print("Written by Ondrej Jirman <megous@megous.com>, 2013-2018\n");
 		g_print("Go to http://megatools.megous.com for more information\n");
 		exit(0);
 	}
@@ -499,35 +467,17 @@ void tool_init(gint *ac, gchar ***av, const gchar *tool_name, GOptionEntry *tool
 	if (tool_entries)
 		g_option_context_add_main_entries(opt_context, tool_entries, NULL);
 
-	GOptionGroup *basic_group = g_option_group_new("basic", "Basic Options:", "Show basic options", NULL, NULL);
-	g_option_group_add_entries(basic_group, basic_options);
-	g_option_context_add_group(opt_context, basic_group);
+	if (flags & TOOL_INIT_UPLOAD_OPTS)
+		g_option_context_add_main_entries(opt_context, upload_options, NULL);
 
-	GOptionGroup *network_group =
-		g_option_group_new("network", "Network Options:", "Show network options", NULL, NULL);
-	g_option_group_add_entries(network_group, network_options);
-	g_option_context_add_group(opt_context, network_group);
+	if (flags & TOOL_INIT_DOWNLOAD_OPTS)
+		g_option_context_add_main_entries(opt_context, download_options, NULL);
 
-	if (flags & (TOOL_INIT_AUTH | TOOL_INIT_AUTH_OPTIONAL)) {
-		GOptionGroup *auth_group = g_option_group_new(
-			"auth", "Authentication Options:", "Show authentication options", NULL, NULL);
-		g_option_group_add_entries(auth_group, auth_options);
-		g_option_context_add_group(opt_context, auth_group);
-	}
+	if (flags & (TOOL_INIT_AUTH | TOOL_INIT_AUTH_OPTIONAL))
+		g_option_context_add_main_entries(opt_context, auth_options, NULL);
 
-	if (flags & TOOL_INIT_UPLOAD_OPTS) {
-		GOptionGroup *upload_group =
-			g_option_group_new("upload", "Upload Options:", "Show upload options", NULL, NULL);
-		g_option_group_add_entries(upload_group, upload_options);
-		g_option_context_add_group(opt_context, upload_group);
-	}
-
-	if (flags & TOOL_INIT_DOWNLOAD_OPTS) {
-		GOptionGroup *download_group =
-			g_option_group_new("download", "Dwonload Options:", "Show download options", NULL, NULL);
-		g_option_group_add_entries(download_group, download_options);
-		g_option_context_add_group(opt_context, download_group);
-	}
+	g_option_context_add_main_entries(opt_context, network_options, NULL);
+	g_option_context_add_main_entries(opt_context, basic_options, NULL);
 
 	if (!g_option_context_parse(opt_context, ac, av, &local_err)) {
 		g_printerr("ERROR: Option parsing failed: %s\n", local_err->message);
@@ -627,6 +577,17 @@ void tool_init(gint *ac, gchar ***av, const gchar *tool_name, GOptionEntry *tool
 					opt_enable_previews = enable;
 				else
 					g_clear_error(&local_err);
+			}
+
+			if (g_key_file_has_key(kf, "UI", "Colors", NULL) && tool_is_stdout_tty()) {
+				tool_use_colors = g_key_file_get_boolean(kf, "UI", "Colors", &local_err);
+				if (local_err) {
+					g_printerr(
+						"WARNING: Invalid value for UI.Colors set in the config file: %s\n",
+						local_err->message);
+					g_clear_error(&local_err);
+					tool_use_colors = FALSE;
+				}
 			}
 		}
 	}

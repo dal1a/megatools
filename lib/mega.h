@@ -28,7 +28,6 @@
 #define MEGA_ERROR mega_error_quark()
 
 enum {
-	MEGA_ERROR_AGAIN,
 	MEGA_ERROR_NO_HANDLE,
 	MEGA_ERROR_OTHER
 };
@@ -83,6 +82,7 @@ struct mega_share_key {
 
 struct mega_node {
 	gchar *name;
+	gchar *name_collate_key;
 	gchar *handle;
 	gchar *parent_handle;
 	gchar *user_handle;
@@ -118,7 +118,7 @@ struct mega_download_data_params {
 
 	gchar *node_handle;
 	gchar *node_name;
-	gsize node_size;
+	guint64 node_size;
 };
 
 #define MEGA_DEBUG_API 0x01
@@ -178,6 +178,7 @@ gboolean mega_session_download_data(struct mega_session *s, struct mega_download
 				    GError **err);
 void mega_download_data_free(struct mega_download_data_params *params);
 
+struct mega_node* mega_session_get_node_by_handle(struct mega_session *s, const gchar* handle);
 gboolean mega_node_is_writable(struct mega_session *s, struct mega_node *n);
 
 gboolean mega_node_is_container(struct mega_node *n);

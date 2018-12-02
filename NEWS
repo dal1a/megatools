@@ -1,3 +1,48 @@
+megatools 1.10.3 - 2018-08-??
+=============================
+
+This release introduces new features.
+
+Improvements:
+- Megatools now install a single `megatools` executable, where former
+  `megaXYZ ...` commands now have to be executed as `megatools XYZ ...`.
+- Implemented PKP (public key pinning for mega.nz's API server). Megatools
+  no longer use public certificate authorities to verify API server's
+  authenticity. If you use software that MITM's your web traffic, megatools
+  will not allow this anymore.
+
+Fixes:
+- 
+
+megatools 1.10.2 - 2018-07-31
+=============================
+
+This is a bugfix release. This release was sponsored by donations to fix
+large file downloads and improve download robustness after recent mega.nz
+API change. Thank you!
+
+Fixes:
+- Actually fix connection dropping when downloading big files
+
+Improvements:
+- Add DNS resolution cache sharing accross all cURL handles
+- Increase receive buffer size to 256kB
+
+megatools 1.10.1 - 2018-07-27
+=============================
+
+This is a bugfix release + one feature addition by del1a.
+
+New features:
+- Allow to interactively choose which files to download from a public folder via
+  megadl --choose-files
+
+Fixes:
+- Connection dropping when downloading big files
+- Compatibility with older libcurl releases
+- Fix occasional crashes when starting transfer worker threads
+- Fix clang compatibility
+
 megatools 1.10.0 - 2018-07-22
 =============================
 

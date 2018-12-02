@@ -20,13 +20,13 @@ Megatools use INI configuration file to store commonly used login credentials.
 This makes it less bothersome to use the tools, as you can simply write
 
 --------
-$ megadf
+$ megatools df
 --------
 
 instead of
 
 --------
-$ megadf --username my@email.com --password mypass
+$ megatools df --username my@email.com --password mypass
 --------
 
 when using the tools.
@@ -64,7 +64,7 @@ Timeout::
 
 
 [Network] Section
-~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~
 
 DownloadSpeedLimit::
 	Set maximum allowed download speed in KiB/s.
@@ -95,10 +95,18 @@ Proxy::
 	* `socks5h://localhost:9050` : Local SOCKSv5 proxy server with DNS handled by the proxy
 
 [Upload] Section
-~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~
 
 CreatePreviews::
 	Create Previews (see --enable-previews option).
+
+[UI] Section
+~~~~~~~~~~~~
+
+Colors::
+	Enable color output in the progress reporting. Colors are disabled by default
+	to support all kinds of terminal configurations. Colors are not configurable,
+	yet.
 
 
 EXAMPLE
@@ -117,9 +125,12 @@ SpeedLimit = 1024
 # Use over TOR
 Proxy = socks5://127.0.0.1:9050
 ParallelTransfers = 2
+
+[UI]
+Colors = true
 ------------
 
-Run man:megadf[1] to check that megatools are able to login to your account.
+Run man:megatools-df[1] to check that megatools are able to login to your account.
 
 
 include::footer.txt[]

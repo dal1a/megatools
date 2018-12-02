@@ -1,5 +1,5 @@
 AC_PREREQ(2.60)
-AC_INIT([megatools],[1.10.0],[megous@megous.com],[megatools])
+AC_INIT([megatools],[1.11.0-git],[megous@megous.com],[megatools])
 AC_CONFIG_SRCDIR([Makefile.am])
 AC_CONFIG_MACRO_DIR([m4])
 AC_CONFIG_HEADER([config.h])
@@ -8,21 +8,19 @@ AM_MAINTAINER_MODE
 AM_SILENT_RULES([yes])
 
 AC_PROG_CC
-AC_PROG_RANLIB
+#AC_PROG_RANLIB
 AM_PROG_CC_C_O
-#AC_LIBTOOL_WIN32_DLL
-#AM_PROG_LIBTOOL
+AC_PROG_LN_S
 AC_HEADER_STDC
+
+AC_LIBTOOL_WIN32_DLL
+AM_PROG_LIBTOOL
 
 # Define requirements
 
 GLIB_VERSION="2.32.0"
 LIBCURL_REQUIRES="libcurl"
 OPENSSL_REQUIRES="openssl"
-MEGA_REQUIRES="gio-2.0 >= $GLIB_VERSION $LIBCURL_REQUIRES $OPENSSL_REQUIRES"
-
-# for libmega.pc
-AC_SUBST(MEGA_REQUIRES)
 
 # check for glib/gio
 PKG_CHECK_MODULES(GLIB, [gio-2.0 >= $GLIB_VERSION])
@@ -39,6 +37,10 @@ PKG_CHECK_MODULES(LIBCURL, [$LIBCURL_REQUIRES])
 AC_SUBST(LIBCURL_CFLAGS)
 AC_SUBST(LIBCURL_LIBS)
 
+# enable compatibility symlinks
+AC_ARG_ENABLE([compat-symlinks], AC_HELP_STRING([--enable-compat-symlinks], [Install symlinks for compatibility with old megatools commands (megals, megacopy, megadl, ...).]))
+AM_CONDITIONAL([INSTALL_COMPAT_SYMLINKS], [test "x$enable_compat_symlinks" = "xyes"])
+
 # enable dev compiler warnings
 AC_ARG_ENABLE([warnings], AC_HELP_STRING([--enable-warnings], [Build with compiler warnings enabled.]))
 AS_IF([test "x$enable_warnings" = "xyes"], [
@@ -48,17 +50,6 @@ AS_IF([test "x$enable_warnings" = "xyes"], [
 ], [
   CFLAGS="$CFLAGS -Wno-pointer-sign -Wno-unused-variable"
   enable_warnings=no
-])
-
-# enable docs building
-AC_ARG_ENABLE([docs], AC_HELP_STRING([--disable-docs], [Don't build and install man pages.]))
-AM_CONDITIONAL([ENABLE_DOCS], [test "x$enable_docs" != xno])
-AS_IF([test "x$enable_docs" != "xno"], [
-  AC_PATH_PROG([A2X], [a2x], [no])
-  AS_IF([test "x$A2X" = xno], [
-    AC_MSG_ERROR([a2x is required to build docs, install asciidoc])
-  ])
-  enable_docs=yes
 ])
 
 AC_CONFIG_FILES([
@@ -71,7 +62,6 @@ cat << EOF
 
 Configured features:
 
-  docs build: $enable_docs
   warnings: $enable_warnings
 
 Run make now.

@@ -18,6 +18,7 @@
  */
 
 #include "tools.h"
+#include "shell.h"
 
 static gboolean opt_names;
 static gboolean opt_recursive;
@@ -51,7 +52,7 @@ static gint compare_node(struct mega_node *a, struct mega_node *b)
 	return 0;
 }
 
-int main(int ac, char *av[])
+static int ls_main(int ac, char *av[])
 {
 	struct mega_session *s;
 	gc_error_free GError *local_err = NULL;
@@ -113,7 +114,7 @@ int main(int ac, char *av[])
 		gc_free gchar *node_path = mega_node_get_path_dup(n);
 
 		if (opt_export)
-			g_print("%73s ", n->link ? mega_node_get_link(n, TRUE) : "");
+			g_print("%-70s ", n->link ? mega_node_get_link(n, TRUE) : "");
 
 		if (opt_long) {
 			GDateTime *dt = g_date_time_new_from_unix_local(n->timestamp);
@@ -142,3 +143,12 @@ int main(int ac, char *av[])
 	tool_fini(s);
 	return 0;
 }
+
+const struct shell_tool shell_tool_ls = {
+	.name = "ls",
+	.main = ls_main,
+	.usages = (char*[]){
+		"[-e] [-h] [--header] [-l] [-R] [-n] [<remotepaths>...]",
+		NULL
+	},
+};

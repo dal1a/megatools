@@ -1176,6 +1176,7 @@ err_clean:
 	return FALSE;
 }
 
+#if 0
 static void meta_mac_pack(guchar meta_mac[16], guchar packed[8])
 {
 	gint i;
@@ -1185,6 +1186,7 @@ static void meta_mac_pack(guchar meta_mac[16], guchar packed[8])
 	for (i = 0; i < 4; i++)
 		packed[i + 4] = meta_mac[i + 8] ^ meta_mac[i + 12];
 }
+#endif
 
 // }}}
 // {{{ aes128 ctr
@@ -1603,11 +1605,11 @@ static gchar *api_call(struct mega_session *s, gchar expects, gint *error_code, 
 
 // Remote filesystem helpers
 
-// {{{ update_pathmap
+// {{{ build_node_tree
 
 static void mega_node_free(struct mega_node *n);
 
-static void update_pathmap(struct mega_session *s)
+static void build_node_tree(struct mega_session *s)
 {
 	GSList *i, *next;
 	g_return_if_fail(s != NULL);
@@ -1640,21 +1642,6 @@ static void update_pathmap(struct mega_session *s)
 				n->parent = g_hash_table_lookup(handle_map, n->parent_handle);
 		}
 
-#if 0
-		// remove parentless non-root nodes from the list
-		if (!n->parent && (n->type == MEGA_NODE_FILE || n->type == MEGA_NODE_FOLDER || n->type == MEGA_NODE_CONTACT)) {
-			// remove current node
-			if (prev) 
-				prev->next = next;
-			else 
-				s->fs_nodes = next;
-
-			g_slist_free_1(i);
-			mega_node_free(n);
-		}
-		else
-			prev = i;
-#endif
 		i = next;
 	}
 
@@ -1662,15 +1649,10 @@ static void update_pathmap(struct mega_session *s)
 }
 
 // }}}
-// {{{ update_pathmap_prune
+// {{{ rebase_node_tree
 
-static void update_pathmap_prune(struct mega_session *s, const gchar *specific)
+static gboolean rebase_node_tree(struct mega_session *s, const gchar *new_root)
 {
-	update_pathmap(s);
-
-	if (!specific)
-		return;
-
 	/* Remove nodes that are not decendents of nodes with their |handle| == |specific|
 	// -------------------------------------------------------------------------------
 	// Example with dir1 as the target, e.g. |handle| == |specific|:
@@ -1686,35 +1668,56 @@ static void update_pathmap_prune(struct mega_session *s, const gchar *specific)
 	// This will remove 'root', 'dir2', and 'file2'; 'dir1' becomes the root node.
 	// -----------------------------------------------------------------------------*/
 
-	gc_array_unref GArray *remove_nodes = g_array_new(FALSE, FALSE, sizeof(struct mega_node *));
-	GSList *i;
+	struct mega_node *root_node = mega_session_get_node_by_handle(s, new_root);
+	if (root_node == NULL)
+		return FALSE;
 
-	// find nodes to remove
-	for (i = s->fs_nodes; i; i = i->next) {
-		struct mega_node *n = i->data;
-		struct mega_node *p_node = n->parent;
+	if (root_node->type == MEGA_NODE_FILE) {
+		// if the new root is a file, just place it under a newly
+		// created root and remove everything else
 
-		if (g_str_equal(n->handle, specific)) {
-			// convert target into root node
-			n->type = MEGA_NODE_ROOT;
-			n->parent = NULL;
-			n->parent_handle = NULL;
-		} else {
-			while (p_node && !g_str_equal(p_node->handle, specific))
-				p_node = p_node->parent;
+		s->fs_nodes = g_slist_remove(s->fs_nodes, root_node);
+		g_slist_free_full(s->fs_nodes, (GDestroyNotify)mega_node_free);
+		s->fs_nodes = NULL;
 
-			if (!p_node || !g_str_equal(p_node->handle, specific))
-				g_array_append_val(remove_nodes, n);
+		// add 
+		g_clear_pointer(&root_node->parent_handle, g_free);
+		root_node->parent = NULL;
+		s->fs_nodes = g_slist_prepend(s->fs_nodes, root_node);
+	} else if (root_node->type == MEGA_NODE_FOLDER) {
+		GSList *i, *i_next, **i_prev_next = &s->fs_nodes;
+		GSList *free_list = NULL;
+
+		g_clear_pointer(&root_node->parent_handle, g_free);
+		root_node->parent = NULL;
+
+		// find nodes that are not children of root_node and remove them
+		for (i = s->fs_nodes; i; i = i_next) {
+			struct mega_node *n = i->data;
+
+			i_next = i->next;
+
+			if (n != root_node && !mega_node_has_ancestor(n, root_node)) {
+				// drop link
+				*i_prev_next = i_next;
+				g_slist_free_1(i);
+
+				// we can't free the node right here, because it
+				// needs to be available for
+				// mega_node_has_ancestor checks
+				free_list = g_slist_prepend(free_list, n);
+			} else {
+				// move next address of previously kept node
+				i_prev_next = &i->next;
+			}
 		}
+
+		g_slist_free_full(free_list, (GDestroyNotify)mega_node_free);
+	} else {
+		return FALSE;
 	}
 
-	// remove nodes from s->fs_nodes
-	gint idx;
-	for (idx = 0; idx < remove_nodes->len; idx++) {
-		struct mega_node *r = g_array_index(remove_nodes, struct mega_node *, idx);
-		s->fs_nodes = g_slist_remove(s->fs_nodes, r);
-		mega_node_free(r);
-	}
+	return TRUE;
 }
 
 // }}}
@@ -1849,6 +1852,7 @@ static struct mega_node *mega_node_parse(struct mega_session *s, const gchar *no
 	if (node_t == MEGA_NODE_ROOT) {
 		struct mega_node *n = g_new0(struct mega_node, 1);
 		n->name = g_strdup("Root");
+		n->name_collate_key = g_utf8_collate_key_for_filename(n->name, -1);
 		n->handle = g_strdup(node_h);
 		n->timestamp = node_ts;
 		n->type = node_t;
@@ -1856,6 +1860,7 @@ static struct mega_node *mega_node_parse(struct mega_session *s, const gchar *no
 	} else if (node_t == MEGA_NODE_INBOX) {
 		struct mega_node *n = g_new0(struct mega_node, 1);
 		n->name = g_strdup("Inbox");
+		n->name_collate_key = g_utf8_collate_key_for_filename(n->name, -1);
 		n->handle = g_strdup(node_h);
 		n->timestamp = node_ts;
 		n->type = node_t;
@@ -1863,6 +1868,7 @@ static struct mega_node *mega_node_parse(struct mega_session *s, const gchar *no
 	} else if (node_t == MEGA_NODE_TRASH) {
 		struct mega_node *n = g_new0(struct mega_node, 1);
 		n->name = g_strdup("Trash");
+		n->name_collate_key = g_utf8_collate_key_for_filename(n->name, -1);
 		n->handle = g_strdup(node_h);
 		n->timestamp = node_ts;
 		n->type = node_t;
@@ -1995,6 +2001,7 @@ static struct mega_node *mega_node_parse(struct mega_session *s, const gchar *no
 
 	n->s = s;
 	n->name = TAKE(node_name);
+	n->name_collate_key = g_utf8_collate_key_for_filename(n->name, -1);
 	n->handle = TAKE(node_h);
 	n->parent_handle = TAKE(node_p);
 	n->user_handle = TAKE(node_u);
@@ -2027,6 +2034,7 @@ static struct mega_node *mega_node_parse_user(struct mega_session *s, const gcha
 	struct mega_node *n = g_new0(struct mega_node, 1);
 	n->s = s;
 	n->name = node_m;
+	n->name_collate_key = g_utf8_collate_key_for_filename(n->name, -1);
 	n->handle = node_u;
 	n->parent_handle = g_strdup("NETWORK");
 	n->user_handle = g_strdup(node_u);
@@ -2058,6 +2066,7 @@ static void mega_node_free(struct mega_node *n)
 {
 	if (n) {
 		g_free(n->name);
+		g_free(n->name_collate_key);
 		g_free(n->handle);
 		g_free(n->parent_handle);
 		g_free(n->user_handle);
@@ -2221,22 +2230,22 @@ gboolean mega_session_open_exp_folder(struct mega_session *s, const gchar *n, co
 
 	const gchar *ff_node = s_json_get_member(f_node, "f");
 	if (ff_node && s_json_get_type(ff_node) == S_JSON_TYPE_ARRAY) {
-		const gchar *node;
-		gint i = 0;
+		gc_free gchar** f_elems = s_json_get_elements(ff_node);
+		gchar** f_elem = f_elems;
 
-		while ((node = s_json_get_element(ff_node, i++))) {
-			if (s_json_get_type(node) == S_JSON_TYPE_OBJECT) {
+		while (*f_elem) {
+			if (s_json_get_type(*f_elem) == S_JSON_TYPE_OBJECT) {
 				// first node is the root folder
-				if (i == 1) {
-					gc_free gchar *node_h = s_json_get_member_string(node, "h");
+				if (f_elem == f_elems) {
+					gc_free gchar *node_h = s_json_get_member_string(*f_elem, "h");
 
 					add_share_key(s, node_h, s->master_key);
 				}
 
 				// import nodes into the fs
-				struct mega_node *n = mega_node_parse(s, node);
+				struct mega_node *n = mega_node_parse(s, *f_elem);
 				if (n) {
-					if (i == 1) {
+					if (f_elem == f_elems) {
 						g_free(n->parent_handle);
 						n->parent_handle = NULL;
 					}
@@ -2244,12 +2253,23 @@ gboolean mega_session_open_exp_folder(struct mega_session *s, const gchar *n, co
 					list = g_slist_prepend(list, n);
 				}
 			}
+
+			f_elem++;
 		}
 	}
 
 	g_slist_free_full(s->fs_nodes, (GDestroyNotify)mega_node_free);
 	s->fs_nodes = g_slist_reverse(list);
-	update_pathmap_prune(s, specific);
+
+	build_node_tree(s);
+
+	// rebase node tree
+	if (specific) {
+		if (!rebase_node_tree(s, specific)) {
+			g_set_error(err, MEGA_ERROR, MEGA_ERROR_OTHER, "Node not found: %s", specific);
+			return FALSE;
+		}
+	}
 
 	return TRUE;
 }
@@ -2526,6 +2546,7 @@ gboolean mega_session_refresh(struct mega_session *s, GError **err)
 	struct mega_node *n = g_new0(struct mega_node, 1);
 	n->s = s;
 	n->name = g_strdup("Contacts");
+	n->name_collate_key = g_utf8_collate_key_for_filename(n->name, -1);
 	n->handle = g_strdup("NETWORK");
 	n->type = MEGA_NODE_NETWORK;
 	list = g_slist_prepend(list, n);
@@ -2555,7 +2576,7 @@ gboolean mega_session_refresh(struct mega_session *s, GError **err)
 	g_slist_free_full(s->fs_nodes, (GDestroyNotify)mega_node_free);
 	s->fs_nodes = g_slist_reverse(list);
 
-	update_pathmap(s);
+	build_node_tree(s);
 
 	s->last_refresh = time(NULL);
 
@@ -2735,6 +2756,18 @@ struct mega_node *mega_session_stat(struct mega_session *s, const gchar *path)
 // }}}
 // {{{ mega_session_get_node_chilren
 
+static gint node_name_compare(const struct mega_node *a, const struct mega_node *b)
+{
+	if (a->name_collate_key == NULL && b->name_collate_key == NULL)
+		return 0;
+	if (a->name_collate_key == NULL)
+		return -1;
+	if (b->name_collate_key == NULL)
+		return 1;
+
+	return strcmp(a->name_collate_key, b->name_collate_key);
+}
+
 GSList *mega_session_get_node_chilren(struct mega_session *s, struct mega_node *node)
 {
 	GSList *list = NULL, *i;
@@ -2747,10 +2780,10 @@ GSList *mega_session_get_node_chilren(struct mega_session *s, struct mega_node *
 		struct mega_node *child = i->data;
 
 		if (child->parent_handle && !strcmp(child->parent_handle, node->handle))
-			list = g_slist_prepend(list, child);
+			list = g_slist_insert_sorted(list, child, (GCompareFunc)node_name_compare);
 	}
 
-	return g_slist_reverse(list);
+	return list;
 }
 
 // }}}
@@ -2842,7 +2875,7 @@ struct mega_node *mega_session_mkdir(struct mega_session *s, const gchar *path, 
 
 	// add mkdired node to the filesystem
 	s->fs_nodes = g_slist_append(s->fs_nodes, n);
-	update_pathmap(s);
+	build_node_tree(s);
 
 	return n;
 }
@@ -2888,10 +2921,31 @@ gboolean mega_session_rm(struct mega_session *s, const gchar *path, GError **err
 		return FALSE;
 	}
 
-	// remove node from the filesystem
-	s->fs_nodes = g_slist_remove(s->fs_nodes, mn);
-	mega_node_free(mn);
-	update_pathmap(s);
+	GSList *i, *i_next, **i_prev_next = &s->fs_nodes;
+	GSList *free_list = NULL;
+
+	// remove node and all the children from the list
+	for (i = s->fs_nodes; i; i = i_next) {
+		struct mega_node *n = i->data;
+
+		i_next = i->next;
+
+		if (n == mn || mega_node_has_ancestor(n, mn)) {
+			// drop link
+			*i_prev_next = i_next;
+			g_slist_free_1(i);
+
+			// we can't free the node right here, because it
+			// needs to be available for
+			// mega_node_has_ancestor checks
+			free_list = g_slist_prepend(free_list, n);
+		} else {
+			// move next address of previously kept node
+			i_prev_next = &i->next;
+		}
+	}
+
+	g_slist_free_full(free_list, (GDestroyNotify)mega_node_free);
 
 	return TRUE;
 }
@@ -3172,6 +3226,7 @@ static void tman_worker_upload_chunk(struct transfer_chunk *c, struct transfer_w
 	GError *local_err = NULL;
 	gc_free gchar *url = NULL;
 	gc_string_free GString *response = NULL;
+	gc_free gchar* chksum = NULL;
 
 	tman_debug("W[%d]: started for chunk %d\n", worker->index, c->index);
 
@@ -3217,7 +3272,7 @@ static void tman_worker_upload_chunk(struct transfer_chunk *c, struct transfer_w
 	}
 
 	// prepare URL including chunk offset
-	gc_free gchar* chksum = upload_checksum(buf, c->size);
+	chksum = upload_checksum(buf, c->size);
 	url = g_strdup_printf("%s/%" G_GOFFSET_FORMAT "?c=%s", t->upload_url, c->offset, chksum);
 
 	// perform upload POST
@@ -3237,13 +3292,11 @@ static void tman_worker_upload_chunk(struct transfer_chunk *c, struct transfer_w
 		// check for numeric error code
 		if (response->len < 10 && g_regex_match_simple("^-(\\d+)$", response->str, 0, 0)) {
 			int code = atoi(response->str);
-			int mega_err = MEGA_ERROR_OTHER;
 			const char* err_str = "???";
 
 			switch (code) {
 				case -3:
 					err_str = "EAGAIN";
-					mega_err = MEGA_ERROR_AGAIN;
 					break;
 				case -4:
 					err_str = "EFAILED";
@@ -3265,7 +3318,7 @@ static void tman_worker_upload_chunk(struct transfer_chunk *c, struct transfer_w
 					break;
 			}
 
-			err = g_error_new(MEGA_ERROR, mega_err, "Server returned error code %d (%s)", code, err_str);
+			err = g_error_new(MEGA_ERROR, MEGA_ERROR_OTHER, "Server returned error code %d (%s)", code, err_str);
 			goto err;
 		}
 
@@ -3678,12 +3731,11 @@ static gpointer tman_manager_thread_fn(gpointer data)
 				// transfer is in error state and is being aborted
 				tman_debug("M: transfer is being aborted, chunk %d fail ignored\n", c->index);
 			} else {
-				if (g_error_matches(msg->error, MEGA_ERROR, MEGA_ERROR_AGAIN)
+				if (g_error_matches(msg->error, HTTP_ERROR, HTTP_ERROR_COMM_FAILURE)
 						|| g_error_matches(msg->error, HTTP_ERROR, HTTP_ERROR_TIMEOUT)
 						|| g_error_matches(msg->error, HTTP_ERROR, HTTP_ERROR_SERVER_BUSY)
 						|| g_error_matches(msg->error, HTTP_ERROR, HTTP_ERROR_NO_RESPONSE)) {
-
-					if (c->failures_count > 6) {
+					if (c->failures_count > 8) {
 						g_printerr("WARNING: chunk upload failed too many times (%s), aborting transfer\n", msg->error->message);
 
 						// mark transfer as aborted
@@ -3746,8 +3798,8 @@ static void tman_init(int max_workers)
 	tman.workers = g_new0(struct transfer_worker, max_workers);
 	for (int i = 0; i < max_workers; i++) {
 		tman.workers[i].index = i;
-		tman.workers[i].thread = g_thread_new("transfer worker", tman_worker_thread_fn, &tman.workers[i]);
 		tman.workers[i].mailbox = g_async_queue_new();
+		tman.workers[i].thread = g_thread_new("transfer worker", tman_worker_thread_fn, &tman.workers[i]);
 	}
 
 	// start manager
@@ -4041,12 +4093,10 @@ try_again:
 		/* out: */ &up_handle, meta_mac, &local_err);
 
 	if (!transfer_ok) {
-		if (g_error_matches(local_err, MEGA_ERROR, MEGA_ERROR_NO_HANDLE)) {
-			if (retries-- > 0) {
-				g_printerr("WARNING: Mega didn't return an upload handle, retrying transfer\n");
-				g_clear_error(&local_err);
-				goto try_again;
-			}
+		if (retries-- > 0) {
+			g_printerr("WARNING: Mega upload failed (%s), retrying transfer (%d retries left)\n", local_err ? local_err->message : "???", retries);
+			g_clear_error(&local_err);
+			goto try_again;
 		}
 
 		g_propagate_prefixed_error(err, local_err, "Data upload failed: ");
@@ -4105,9 +4155,12 @@ try_again:
 
 struct get_data_state {
 	struct mega_session *s;
-	GFileOutputStream *stream;
+	GOutputStream *ostream;
 	EVP_CIPHER_CTX *ctx;
 	struct chunked_cbc_mac mac;
+	struct chunked_cbc_mac mac_saved;
+	guint64 progress_offset;
+	guint64 progress_total;
 };
 
 static gboolean progress_dl(goffset dltotal, goffset dlnow, goffset ultotal, goffset ulnow, gpointer user_data)
@@ -4115,8 +4168,8 @@ static gboolean progress_dl(goffset dltotal, goffset dlnow, goffset ultotal, gof
 	struct get_data_state *data = user_data;
 	struct mega_status_data status_data = {
 		.type = MEGA_STATUS_PROGRESS,
-		.progress.total = dltotal,
-		.progress.done = dlnow,
+		.progress.total = data->progress_total,
+		.progress.done = data->progress_offset + dlnow,
 	};
 
 	send_status(data->s, &status_data);
@@ -4153,16 +4206,58 @@ static gsize get_data_cb(gpointer buffer, gsize size, gpointer user_data)
 
 	send_status(data->s, &status_data);
 
-	if (!data->stream)
+	if (!data->ostream)
 		return size;
 
-	if (!g_output_stream_write_all(G_OUTPUT_STREAM(data->stream), buffer, size, NULL, NULL,
-				       &local_err)) {
+	if (!g_output_stream_write_all(data->ostream, buffer, size, NULL, NULL, &local_err)) {
 		g_printerr("ERROR: Failed writing to stream: %s\n", local_err->message);
 		return 0;
 	}
 
 	return size;
+}
+
+static gboolean evp_set_ctr_postion(EVP_CIPHER_CTX* ctx, guint64 off, guchar* nonce, guchar* key, GError** err)
+{
+	g_return_val_if_fail(ctx != NULL, FALSE);
+	g_return_val_if_fail(nonce != NULL, FALSE);
+	g_return_val_if_fail(key != NULL, FALSE);
+	g_return_val_if_fail(err == NULL || *err == NULL, FALSE);
+
+	union {
+		guchar iv[16];
+		struct {
+			guchar nonce[8];
+			guint64 ctr;
+		};
+	} iv;
+
+	_Static_assert(sizeof(iv) == 16, "iv union is not 16bytes long, you're using an interesting architecture");
+
+	memcpy(iv.nonce, nonce, 8);
+	iv.ctr = GUINT64_TO_BE(off / 16);
+
+	if (!EVP_EncryptInit_ex(ctx, NULL, NULL, key, iv.iv)) {
+		g_set_error(err, MEGA_ERROR, MEGA_ERROR_OTHER, "Failed to init aes-ctr decryptor");
+		return FALSE;
+	}
+
+	EVP_CIPHER_CTX_set_padding(ctx, 0);
+
+	// offset may be up to 15 bytes into a block, do some dummy decryption,
+	// to put EVP into a correct state
+	guchar scratch[16];
+	int out_len;
+	int ib_off = off % 16;
+
+	if (ib_off > 0) {
+		if (!EVP_EncryptUpdate(ctx, scratch, &out_len, scratch, ib_off) || out_len != ib_off) {
+			g_set_error(err, MEGA_ERROR, MEGA_ERROR_OTHER, "Failed to init aes-ctr decryptor (intra-block)");
+			return FALSE;
+		}
+	}
+
+	return TRUE;
 }
 
 #define RESUME_BUF_SIZE (1024 * 1024)
@@ -4173,9 +4268,9 @@ gboolean mega_session_download_data(struct mega_session *s, struct mega_download
 	GError *local_err = NULL;
 	gc_object_unref GFile *dir = NULL;
 	gc_object_unref GFile *tmp_file = NULL;
-	gc_object_unref GFileOutputStream *stream = NULL;
-	gc_free gchar *url = NULL;
-	gc_http_free struct http *h = NULL;
+	gc_object_unref GFileIOStream *iostream = NULL;
+	gc_object_unref GFileOutputStream *ostream = NULL;
+	GSeekable* seekable = NULL;
 	struct get_data_state state = { .s = s };
 	gc_free gchar *tmp_path = NULL, *file_path = NULL, *tmp_name = NULL;
 	guint64 download_from = 0;
@@ -4221,9 +4316,11 @@ gboolean mega_session_download_data(struct mega_session *s, struct mega_download
 		tmp_path = g_file_get_path(tmp_file);
 
 		if (s->resume_enabled) {
+			// if temporary file exists, read it and initialize the
+			// meta mac calculator state with the contents
 			if (g_file_query_exists(tmp_file, NULL)) {
-				GFileInputStream *tmp_stream = g_file_read(tmp_file, NULL, &local_err);
-				if (tmp_stream == NULL) {
+				iostream = g_file_open_readwrite(tmp_file, NULL, &local_err);
+				if (iostream == NULL) {
 					g_propagate_prefixed_error(err, local_err,
 								   "Can't open previous temporary file for resume %s",
 								   tmp_path);
@@ -4231,14 +4328,15 @@ gboolean mega_session_download_data(struct mega_session *s, struct mega_download
 				}
 
 				buf = g_malloc(RESUME_BUF_SIZE);
+				GInputStream* istream = g_io_stream_get_input_stream(G_IO_STREAM(iostream));
+				state.ostream = g_io_stream_get_output_stream(G_IO_STREAM(iostream));
+				seekable = G_SEEKABLE(iostream);
 
 				while (TRUE) {
-					bytes_read = g_input_stream_read(G_INPUT_STREAM(tmp_stream), buf,
-									 RESUME_BUF_SIZE, NULL, &local_err);
+					bytes_read = g_input_stream_read(istream, buf, RESUME_BUF_SIZE, NULL, &local_err);
 					if (bytes_read == 0)
 						break;
 					if (bytes_read < 0) {
-						g_object_unref(tmp_stream);
 						g_propagate_prefixed_error(
 							err, local_err,
 							"Can't read previous temporary file for resume %s", tmp_path);
@@ -4247,30 +4345,28 @@ gboolean mega_session_download_data(struct mega_session *s, struct mega_download
 
 					// update cbc-mac
 					if (!chunked_cbc_mac_update(&state.mac, buf, bytes_read)) {
-						g_object_unref(tmp_stream);
 						g_set_error(err, MEGA_ERROR, MEGA_ERROR_OTHER, "Failed to run mac calculator during resume");
 						return FALSE;
 					}
+
 					download_from += bytes_read;
 				}
 
-				g_object_unref(tmp_stream);
-
-				// append to temporary file
-				state.stream = stream = g_file_append_to(tmp_file, 0, NULL, &local_err);
-				if (!state.stream) {
-					g_propagate_prefixed_error(
-						err, local_err, "Can't open local file %s for appending: ", tmp_path);
+				if (download_from > params->node_size) {
+					g_set_error(err, MEGA_ERROR, MEGA_ERROR_OTHER, "Unfinished downloaded data are larger than the node being downloaded (you can eg. remove %s to fix the issue)", tmp_path);
 					return FALSE;
 				}
 			} else {
-				// create temporary file
-				state.stream = stream = g_file_create(tmp_file, 0, NULL, &local_err);
-				if (!state.stream) {
+				// create a new temporary file
+				ostream = g_file_create(tmp_file, 0, NULL, &local_err);
+				if (!ostream) {
 					g_propagate_prefixed_error(err, local_err,
 								   "Can't open local file %s for writing: ", tmp_path);
 					return FALSE;
 				}
+
+				seekable = G_SEEKABLE(ostream);
+				state.ostream = G_OUTPUT_STREAM(ostream);
 			}
 		} else {// !resume_enabled
 			// if temporary file exists, delete it
@@ -4281,12 +4377,15 @@ gboolean mega_session_download_data(struct mega_session *s, struct mega_download
 			}
 
 			// create temporary file
-			state.stream = stream = g_file_create(tmp_file, 0, NULL, &local_err);
-			if (!state.stream) {
+			ostream = g_file_create(tmp_file, 0, NULL, &local_err);
+			if (!ostream) {
 				g_propagate_prefixed_error(err, local_err,
 							   "Can't open local file %s for writing: ", tmp_path);
 				return FALSE;
 			}
+
+			seekable = G_SEEKABLE(ostream);
+			state.ostream = G_OUTPUT_STREAM(ostream);
 		}
 	}
 
@@ -4297,12 +4396,7 @@ gboolean mega_session_download_data(struct mega_session *s, struct mega_download
 		return FALSE;
 	}
 
-	guchar iv[16] = {0};
-	memcpy(iv, nonce, 8);
-	// initialize counter to the download_from position
-	*(guint64 *)(iv + 8) = GUINT64_TO_BE(download_from / 16);
-
-	if (!EVP_EncryptInit_ex(state.ctx, EVP_aes_128_ctr(), NULL, aes_key, iv)) {
+	if (!EVP_EncryptInit_ex(state.ctx, EVP_aes_128_ctr(), NULL, NULL, NULL)) {
 		EVP_CIPHER_CTX_free(state.ctx);
 		g_set_error(err, MEGA_ERROR, MEGA_ERROR_OTHER, "Failed to init aes-ctr decryptor");
 		return FALSE;
@@ -4310,22 +4404,11 @@ gboolean mega_session_download_data(struct mega_session *s, struct mega_download
 
 	EVP_CIPHER_CTX_set_padding(state.ctx, 0);
 
-	// finally we may be up to 15 bytes into a block, do some dummy
-	// decryption, to put EVP into a correct state
-	guchar scratch[16];
-	int out_len;
-
-	if (!EVP_EncryptUpdate(state.ctx, scratch, &out_len, scratch, download_from % 16) || out_len != download_from % 16) {
+	if (!evp_set_ctr_postion(state.ctx, download_from, nonce, aes_key, &local_err)) {
 		EVP_CIPHER_CTX_free(state.ctx);
-		g_set_error(err, MEGA_ERROR, MEGA_ERROR_OTHER, "Failed to init aes-ctr decryptor (intra-block)");
+		g_propagate_error(err, local_err);
 		return FALSE;
 	}
-
-	if (download_from > 0)
-		url = g_strdup_printf("%s/%" G_GUINT64_FORMAT "-%" G_GUINT64_FORMAT, params->download_url,
-				      download_from, params->node_size - 1);
-	else
-		url = g_strdup(params->download_url);
 
 	// send initial progress report
 	status_data = (struct mega_status_data) {
@@ -4336,12 +4419,86 @@ gboolean mega_session_download_data(struct mega_session *s, struct mega_download
 
 	send_status(s, &status_data);
 
-	// perform download
-	h = http_new();
-	http_set_progress_callback(h, progress_dl, &state);
-	http_set_speed(h, s->max_ul, s->max_dl);
-	http_set_proxy(h, s->proxy);
-	gboolean download_ok = http_post_stream_download(h, url, get_data_cb, &state, &local_err);
+	// We'll download the file sequentially in 256MB increments (chunks),
+	// re-trying if a chunk fails. We will pre-encrypt and pre-calculate mac
+	// for the chunk so that we don't need to do it again when download
+	// fails.
+	//
+	// It's a big chunk, because mega takes ~800ms to respond to a POST
+	// request for data. So if we use 16MB we'd naturally limit ourselves
+	// to ~18MiB/s on an infinitely fast network. With big chunk size,
+	// the limit is proportionally higher.
+	//
+	// Because meta-mac calculation can't be reversed in case of a chunk
+	// download failure, we save its state prior to chunk download and
+	// restore it from saved state in case we need to rewind.
+
+        state.progress_total = params->node_size - download_from;
+	state.progress_offset = 0;
+
+	const guint64 chunk_size = 256 * 1024 * 1024;
+	while (download_from < params->node_size) {
+		guint64 from = download_from;
+		guint64 to = download_from + MIN(params->node_size - download_from, chunk_size);
+		state.mac_saved = state.mac;
+		guint tries = 0;
+		gboolean download_ok;
+		struct http *h;
+		gc_free gchar *url = g_strdup_printf("%s/%" G_GUINT64_FORMAT "-%" G_GUINT64_FORMAT,
+						     params->download_url,
+						     from, to - 1);
+		// 640 minutes should be enough for everyone
+		const gint64 retry_timeout = 1000ll * 1000 * 60 * 640;
+		gint64 end_time = g_get_monotonic_time() + retry_timeout;
+
+retry:
+		// perform download
+		h = http_new();
+		http_set_progress_callback(h, progress_dl, &state);
+		http_set_speed(h, s->max_ul, s->max_dl);
+		http_set_proxy(h, s->proxy);
+		download_ok = http_post_stream_download(h, url, get_data_cb, &state, &local_err);
+		http_free(h);
+
+		if (!download_ok) {
+			// retry timeout reached
+			if (g_get_monotonic_time() > end_time) {
+				g_propagate_prefixed_error(err, local_err, "Data download failed: ");
+				goto err_noremove;
+			}
+
+			// we wait at most 256 seconds between retries (~4 minutes)
+			tries = MIN(tries + 1, 8);
+
+			// we only retry if we can seek the stream
+			if (seekable) {
+				g_printerr("WARNING: chunk download failed (%s), re-trying after %d seconds\n", local_err ? local_err->message : "?", (1 << tries));
+				g_clear_error(&local_err);
+			}
+
+			// restore saved mac calculation state
+			state.mac = state.mac_saved;
+
+			// seek back the stream
+			if (!g_seekable_seek(seekable, from, G_SEEK_SET, NULL, &local_err)) {
+				g_propagate_prefixed_error(err, local_err, "Failed to rewind the temporary file after chunk download failure");
+				goto err_noremove;
+			}
+
+			// restore CTR encryption state
+			if (!evp_set_ctr_postion(state.ctx, from, nonce, aes_key, &local_err)) {
+				g_propagate_prefixed_error(err, local_err, "Failed to rewind the temporary file after chunk download failure");
+				goto err_noremove;
+			}
+
+			g_usleep(1000 * 1000 * (1 << tries));
+			goto retry;
+		}
+
+		// move to the next chunk
+		state.progress_offset += to - from;
+		download_from = to;
+	}
 
 	status_data = (struct mega_status_data){
 		.type = MEGA_STATUS_PROGRESS,
@@ -4350,11 +4507,6 @@ gboolean mega_session_download_data(struct mega_session *s, struct mega_download
 	};
 
 	send_status(s, &status_data);
-
-	if (!download_ok) {
-		g_propagate_prefixed_error(err, local_err, "Data download failed: ");
-		goto err_noremove;
-	}
 
 	// check mac of the downloaded file
 	guchar meta_mac_xor_calc[8];
@@ -4368,14 +4520,14 @@ gboolean mega_session_download_data(struct mega_session *s, struct mega_download
 		goto err;
 	}
 
-	if (state.stream) {
-		if (!g_output_stream_close(G_OUTPUT_STREAM(state.stream), NULL, &local_err)) {
-			g_propagate_prefixed_error(err, local_err, "Can't close downloaded file: ");
-			goto err_noremove;
-		}
+	if (ostream && !g_output_stream_close(G_OUTPUT_STREAM(ostream), NULL, &local_err)) {
+		g_propagate_prefixed_error(err, local_err, "Can't close downloaded file: ");
+		goto err_noremove;
+	}
 
-		g_object_unref(state.stream);
-		state.stream = stream = NULL;
+	if (iostream && !g_io_stream_close(G_IO_STREAM(iostream), NULL, &local_err)) {
+		g_propagate_prefixed_error(err, local_err, "Can't close downloaded file: ");
+		goto err_noremove;
 	}
 
 	EVP_CIPHER_CTX_free(state.ctx);
@@ -4384,7 +4536,7 @@ gboolean mega_session_download_data(struct mega_session *s, struct mega_download
 				 NULL, NULL, &local_err)) {
 		g_propagate_prefixed_error(
 			err, local_err,
-			"Can't rename donwloaded temporary file %s to %s (downloaded data are good!): ", tmp_path,
+			"Can't rename downloaded temporary file %s to %s (downloaded data are good!): ", tmp_path,
 			file_path);
 		return FALSE;
 	}
@@ -4539,6 +4691,25 @@ gboolean mega_session_dl_prepare(struct mega_session *s, struct mega_download_da
 
 // }}}
 
+// {{{ mega_session_get_node_by_handle
+
+struct mega_node* mega_session_get_node_by_handle(struct mega_session *s, const gchar* handle)
+{
+	GSList *i;
+
+	g_return_val_if_fail(s != NULL, NULL);
+
+	for (i = s->fs_nodes; i; i = i->next) {
+		struct mega_node *n = i->data;
+
+		if (n->handle && g_str_equal(n->handle, handle))
+			return n;
+	}
+
+	return NULL;
+}
+
+// }}}
 // {{{ mega_node_get_link
 
 gchar *mega_node_get_link(struct mega_node *n, gboolean include_key)
@@ -4854,9 +5025,10 @@ gboolean mega_session_load(struct mega_session *s, const gchar *un, const gchar 
 			n->type = -1;
 
 			S_JSON_FOREACH_MEMBER(fs_node, k, v)
-			if (s_json_string_match(k, "name"))
+			if (s_json_string_match(k, "name")) {
 				n->name = s_json_get_string(v);
-			else if (s_json_string_match(k, "handle"))
+				n->name_collate_key = g_utf8_collate_key_for_filename(n->name, -1);
+			} else if (s_json_string_match(k, "handle"))
 				n->handle = s_json_get_string(v);
 			else if (s_json_string_match(k, "parent_handle"))
 				n->parent_handle = s_json_get_string(v);
@@ -4886,7 +5058,7 @@ gboolean mega_session_load(struct mega_session *s, const gchar *un, const gchar 
 		return FALSE;
 	}
 
-	update_pathmap(s);
+	build_node_tree(s);
 
 	return TRUE;
 }
@@ -5269,6 +5441,13 @@ gboolean mega_session_dl_compat(struct mega_session *s, const gchar *handle, con
 	if (local_path) {
 		if (!file)
 			file = g_file_get_child(parent_dir, params.node_name);
+
+		if (g_file_query_exists(file, NULL)) {
+			g_set_error(err, MEGA_ERROR, MEGA_ERROR_OTHER,
+				    "Local file already exists: %s/%s", local_path, params.node_name);
+			mega_download_data_free(&params);
+			return FALSE;
+		}
 	}
 
 	gboolean status = mega_session_download_data(s, &params, file, err);

@@ -23,15 +23,17 @@
 #include <curl/curl.h>
 #include <string.h>
 
+#define MEGA_NZ_API_PUBKEY_PIN "sha256//0W38e765pAfPqS3DqSVOrPsC4MEOvRBaXQ7nY1AJ47E="
+
 // curlver.h: this macro was added in May 14, 2015
 #ifndef CURL_AT_LEAST_VERSION
 #define CURL_VERSION_BITS(x, y, z) ((x) << 16 | (y) << 8 | z)
 #define CURL_AT_LEAST_VERSION(x, y, z) (LIBCURL_VERSION_NUM >= CURL_VERSION_BITS(x, y, z))
 #endif
 
-#define ENABLE_CONN_SHARING
+//#define STEALTH_MODE
 
-#if CURL_AT_LEAST_VERSION(7, 57, 0) && defined ENABLE_CONN_SHARING
+#if CURL_AT_LEAST_VERSION(7, 12, 0)
 static CURLSH *http_share;
 static GRWLock http_locks[CURL_LOCK_DATA_LAST];
 
@@ -59,10 +61,10 @@ void http_init(void)
 	if (!http_share) {
 		http_share = curl_share_init();
 
-		curl_share_setopt(http_share, CURLSHOPT_SHARE, CURL_LOCK_DATA_COOKIE);
+		//curl_share_setopt(http_share, CURLSHOPT_SHARE, CURL_LOCK_DATA_COOKIE);
 		curl_share_setopt(http_share, CURLSHOPT_SHARE, CURL_LOCK_DATA_DNS);
-		curl_share_setopt(http_share, CURLSHOPT_SHARE, CURL_LOCK_DATA_SSL_SESSION);
-		curl_share_setopt(http_share, CURLSHOPT_SHARE, CURL_LOCK_DATA_CONNECT);
+		//curl_share_setopt(http_share, CURLSHOPT_SHARE, CURL_LOCK_DATA_SSL_SESSION);
+		//curl_share_setopt(http_share, CURLSHOPT_SHARE, CURL_LOCK_DATA_CONNECT);
 
 		for (int i = 0; i < G_N_ELEMENTS(http_locks); i++)
 			g_rw_lock_init(&http_locks[i]);
@@ -112,9 +114,9 @@ struct http *http_new(void)
 		return NULL;
 	}
 
-#if CURL_AT_LEAST_VERSION(7, 57, 0) && defined ENABLE_CONN_SHARING
-	//http_init();
-	//curl_easy_setopt(h->curl, CURLOPT_SHARE, http_share);
+#if CURL_AT_LEAST_VERSION(7, 57, 0)
+	http_init();
+	curl_easy_setopt(h->curl, CURLOPT_SHARE, http_share);
 #endif
 
 #if CURL_AT_LEAST_VERSION(7, 21, 6)
@@ -131,11 +133,28 @@ struct http *http_new(void)
 	curl_easy_setopt(h->curl, CURLOPT_NOSIGNAL, 1L);
 	curl_easy_setopt(h->curl, CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
 
+	curl_easy_setopt(h->curl, CURLOPT_TCP_KEEPALIVE, 1L);
+	curl_easy_setopt(h->curl, CURLOPT_TCP_KEEPIDLE, 120L);
+	curl_easy_setopt(h->curl, CURLOPT_TCP_KEEPINTVL, 60L);
+
+	curl_easy_setopt(h->curl, CURLOPT_BUFFERSIZE, 256 * 1024L);
+
+#if CURL_AT_LEAST_VERSION(7, 44, 0)
+	const gchar* pkp_disable = g_getenv("MEGATOOLS_PKP_DISABLE");
+	if (pkp_disable == NULL || strcmp(pkp_disable, "1")) {
+		if (curl_easy_setopt(h->curl, CURLOPT_PINNEDPUBLICKEY, MEGA_NZ_API_PUBKEY_PIN) != CURLE_OK) {
+			g_printerr("ERROR: Failed to setup public key pinning, aborting! You probably need a newer cURL library.\n");
+			exit(1);
+		} else {
+			curl_easy_setopt(h->curl, CURLOPT_CAINFO, NULL);
+			curl_easy_setopt(h->curl, CURLOPT_SSL_VERIFYPEER, 0L);
+		}
+	}
+#endif
+
 	h->headers = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
 
-	// set default headers
-	//http_set_header(h, "User-Agent", "Megatools (" VERSION ")");
-	
+#if STEALTH_MODE
 	// we are Firefox!
 	http_set_header(h, "User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:61.0) Gecko/20100101 Firefox/61.0");
 	http_set_header(h, "Referer", "https://mega.nz/");
@@ -145,7 +164,10 @@ struct http *http_new(void)
 	http_set_header(h, "Cache-Control", "no-cache");
 	http_set_header(h, "Pragma", "no-cache");
 	http_set_header(h, "DNT", "1");
-
+#else
+	// set default headers
+	http_set_header(h, "User-Agent", "Megatools (" VERSION ")");
+#endif
 	// Disable 100-continue (because it causes needless roundtrips)
 	http_set_header(h, "Expect", "");
 
@@ -190,7 +212,7 @@ void http_set_content_length(struct http *h, goffset len)
 	g_free(tmp);
 }
 
-static int curl_progress(struct http *h, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow)
+static int curl_progress(struct http *h, double dltotal, double dlnow, double ultotal, double ulnow)
 {
 	if (h->progress_cb) {
 		if (!h->progress_cb(dltotal, dlnow, ultotal, ulnow, h->progress_data))
@@ -220,8 +242,8 @@ void http_set_progress_callback(struct http *h, http_progress_fn cb, gpointer da
 		h->progress_data = data;
 
 		curl_easy_setopt(h->curl, CURLOPT_NOPROGRESS, 0L);
-		curl_easy_setopt(h->curl, CURLOPT_XFERINFOFUNCTION, curl_progress);
-		curl_easy_setopt(h->curl, CURLOPT_XFERINFODATA, h);
+		curl_easy_setopt(h->curl, CURLOPT_PROGRESSFUNCTION, (curl_progress_callback)curl_progress);
+		curl_easy_setopt(h->curl, CURLOPT_PROGRESSDATA, h);
 	} else {
 		curl_easy_setopt(h->curl, CURLOPT_NOPROGRESS, 1L);
 	}
@@ -262,6 +284,21 @@ static gboolean to_error(struct http* h, CURLcode res, GError** err)
 			g_set_error(err, HTTP_ERROR, HTTP_ERROR_OTHER, "Can't get http status code");
 	} else if (res == CURLE_OPERATION_TIMEDOUT)
 		g_set_error(err, HTTP_ERROR, HTTP_ERROR_TIMEOUT, "CURL timeout: %s", curl_easy_strerror(res));
+	else if (res == CURLE_RECV_ERROR
+			|| res == CURLE_SEND_ERROR
+			|| res == CURLE_SSL_CONNECT_ERROR
+			|| res == CURLE_UPLOAD_FAILED
+#if CURL_AT_LEAST_VERSION(7, 50, 3)
+			|| res == CURLE_WEIRD_SERVER_REPLY
+#endif
+#if CURL_AT_LEAST_VERSION(7, 49, 0)
+			|| res == CURLE_HTTP2_STREAM
+#endif
+#if CURL_AT_LEAST_VERSION(7, 38, 0)
+			|| res == CURLE_HTTP2
+#endif
+			|| res == CURLE_COULDNT_CONNECT)
+		g_set_error(err, HTTP_ERROR, HTTP_ERROR_COMM_FAILURE, "CURL error: %s", curl_easy_strerror(res));
 	else if (res == CURLE_GOT_NOTHING)
 		g_set_error(err, HTTP_ERROR, HTTP_ERROR_NO_RESPONSE, "CURL error: %s", curl_easy_strerror(res));
 	else
@@ -290,7 +327,7 @@ GString *http_post(struct http *h, const gchar *url, const gchar *body, gssize b
 	if (body) {
 		curl_easy_setopt(h->curl, CURLOPT_NOBODY, 0L);
 		curl_easy_setopt(h->curl, CURLOPT_POSTFIELDS, body);
-		curl_easy_setopt(h->curl, CURLOPT_POSTFIELDSIZE, body_len);
+		curl_easy_setopt(h->curl, CURLOPT_POSTFIELDSIZE, (long)body_len);
 	} else {
 		curl_easy_setopt(h->curl, CURLOPT_NOBODY, 1L);
 		curl_easy_setopt(h->curl, CURLOPT_POSTFIELDS, NULL);
