@@ -253,7 +253,7 @@ GSList* pick_nodes(void)
 	struct mega_node *parent = nodes->data;
 	int indent = 0;
 
-	g_print("1. %s%s\n", parent->name, mega_node_is_container(parent) ? "/" : "");
+	g_print(ESC_NORMAL "1. %s%s\n", parent->name, mega_node_is_container(parent) ? "/" : "");
 
 	for (it = nodes->next; it; it = it->next) {
 		struct mega_node *node = it->data;
@@ -262,7 +262,7 @@ GSList* pick_nodes(void)
 			parent = parent->parent;
 		}
 
-		g_print("%*s|--" ESC_NORMAL "%d. %s", indent*3, "", position, node->name);
+		g_print("%*s|--%d. %s", indent*3, "", position, node->name);
 		if (mega_node_is_container(node)) {
 			g_print("/");
 			indent++;
